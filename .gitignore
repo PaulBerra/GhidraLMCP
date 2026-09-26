@@ -3,8 +3,6 @@
 build/
 dist/
 gradle-app.setting
-!gradle-wrapper.jar
-!gradle-wrapper.properties
 .gradletasknamecache
 
 # Java
@@ -19,6 +17,12 @@ gradle-app.setting
 *.rar
 hs_err_pid*
 replay_pid*
+
+# Gradle wrapper jar/properties must stay tracked (needed by gradlew/gradlew.bat).
+# These negations MUST come after the *.jar exclusion above — gitignore uses
+# last-match-wins, so placing them earlier (as before) silently re-ignored the jar.
+!gradle/wrapper/gradle-wrapper.jar
+!gradle/wrapper/gradle-wrapper.properties
 
 # IDE - IntelliJ IDEA
 .idea/
