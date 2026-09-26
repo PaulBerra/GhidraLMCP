@@ -19,6 +19,7 @@ import org.springframework.boot.web.server.PortInUseException;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.Bean;
 
+import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
 import ghidra.app.services.ProgramManager;
 import ghidra.app.util.importer.AutoImporter;
 import ghidra.app.util.importer.MessageLog;
@@ -27,6 +28,7 @@ import ghidra.framework.model.DomainFile;
 import ghidra.framework.model.DomainFolder;
 import ghidra.framework.model.Project;
 import ghidra.program.model.listing.Program;
+import ghidra.program.util.GhidraProgramUtilities;
 import ghidra.util.Msg;
 import ghidra.util.task.TaskMonitor;
 
@@ -398,6 +400,32 @@ public class McpServerApplication {
     }
 
     /**
+     * Runs full auto-analysis synchronously (no GUI, no progress dialog) and flags the program
+     * as analyzed, exactly like Ghidra's own headless analyzer does. Must be called BEFORE the
+     * program is made current in a tool: activating an unanalyzed program is what makes the
+     * AutoAnalysisPlugin pop up its blocking "<name> has not been analyzed. Would you like to
+     * analyze it now?" dialog, which otherwise hangs any MCP tool call (and the LLM behind it)
+     * until a human clicks it. A no-op if the program is already flagged analyzed.
+     */
+    private static void ensureAnalyzed(Program program) {
+        if (GhidraProgramUtilities.isAnalyzed(program)) {
+            return;
+        }
+        AutoAnalysisManager mgr = AutoAnalysisManager.getAnalysisManager(program);
+        mgr.initializeOptions();
+        int txId = program.startTransaction("McG auto-analysis");
+        boolean success = false;
+        try {
+            mgr.reAnalyzeAll(null);
+            mgr.startAnalysis(TaskMonitor.DUMMY);
+            GhidraProgramUtilities.markProgramAnalyzed(program);
+            success = true;
+        } finally {
+            program.endTransaction(txId, success);
+        }
+    }
+
+    /**
      * Opens a program that is already present in the active Ghidra project, by its project
      * path (e.g. "/libc.so"), and makes it the active program for subsequent tool calls.
      * Use listProjectFiles to discover valid paths.
@@ -420,13 +448,28 @@ public class McpServerApplication {
             throw new IllegalStateException("No ProgramManager service registered on this tool.");
         }
 
-        Program program = pm.openProgram(file);
-        if (program == null) {
-            throw new RuntimeException("Ghidra failed to open program at: " + projectPath);
+        // Obtain the Program object ourselves (rather than pm.openProgram(DomainFile), which
+        // activates it in one atomic step) so we can analyze it BEFORE it becomes current.
+        Object consumer = McpServerApplication.class;
+        Program program;
+        try {
+            program = (Program) file.getDomainObject(consumer, false, false, TaskMonitor.DUMMY);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to open program at " + projectPath + ": " + e.getMessage(), e);
         }
-        pm.setCurrentProgram(program);
-        selectedPlugin = plugin;
-        return program;
+
+        try {
+            ensureAnalyzed(program);
+            pm.openProgram(program);
+            pm.setCurrentProgram(program);
+            selectedPlugin = plugin;
+            return program;
+        } finally {
+            // pm.openProgram(Program) takes its own reference once attached to the tool, so our
+            // consumer reference can be released regardless of success (same pattern as
+            // importProgram's loadResults.release() below).
+            program.release(consumer);
+        }
     }
 
     /**
@@ -460,6 +503,7 @@ public class McpServerApplication {
             loadResults.save(TaskMonitor.DUMMY);
 
             Program program = loadResults.getPrimaryDomainObject();
+            ensureAnalyzed(program);
             pm.openProgram(program);
             pm.setCurrentProgram(program);
             selectedPlugin = plugin;

@@ -138,13 +138,13 @@ public class GhidraService {
         return McpServerApplication.listProjectFiles(folderPath);
     }
 
-    @Tool(description = "Open a program already present in the active Ghidra project by its project path (see listProjectFiles), and make it the active program. Not available in headless mode.")
+    @Tool(description = "Open a program already present in the active Ghidra project by its project path (see listProjectFiles), and make it the active program. If it has never been analyzed, this runs full auto-analysis synchronously first (may take a while on large binaries) so Ghidra never blocks on its 'Would you like to analyze it now?' dialog. Not available in headless mode.")
     public String openProgram(String projectPath) {
         var program = McpServerApplication.openProjectProgram(projectPath);
         return "Opened and selected program: " + program.getName();
     }
 
-    @Tool(description = "Import a binary file from disk (a path on the machine running Ghidra) into the active project and open it, without requiring a manual File > Import. Uses Ghidra's format auto-detection. Not available in headless mode.")
+    @Tool(description = "Import a binary file from disk (a path on the machine running Ghidra) into the active project and open it, without requiring a manual File > Import. Uses Ghidra's format auto-detection, then runs full auto-analysis synchronously before activating the program (may take a while on large binaries) so Ghidra never blocks on its 'Would you like to analyze it now?' dialog. Not available in headless mode.")
     public String importProgram(String filePath) {
         var program = McpServerApplication.importProgram(filePath);
         return "Imported and selected program: " + program.getName();
