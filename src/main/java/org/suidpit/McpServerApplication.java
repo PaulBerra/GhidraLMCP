@@ -288,14 +288,30 @@ public class McpServerApplication {
     }
 
     /**
-     * Returns info about all open programs across all plugin instances.
+     * Returns info about every program open in every CodeBrowser window, including
+     * background tabs that are not the window's current program (e.g. after openProgram
+     * or importProgram added one without switching to it). Each window's current program
+     * is marked "[current]" within that window, and the tool-wide active program (the one
+     * further tool calls operate on) is marked "[active]".
      */
     static List<String> getOpenPrograms() {
         var result = new ArrayList<String>();
+        Program activeProgram = getActiveProgram();
         for (GhidraMCPPlugin p : plugins) {
-            Program prog = p.getCurrentProgram();
-            if (prog != null) {
-                String marker = (p == getActivePlugin()) ? " [active]" : "";
+            ProgramManager pm = p.getProgramManager();
+            if (pm == null) {
+                continue;
+            }
+            Program current = pm.getCurrentProgram();
+            for (Program prog : pm.getAllOpenPrograms()) {
+                var markers = new ArrayList<String>();
+                if (prog == current) {
+                    markers.add("current");
+                }
+                if (prog == activeProgram) {
+                    markers.add("active");
+                }
+                String marker = markers.isEmpty() ? "" : " [" + String.join(", ", markers) + "]";
                 result.add(prog.getName() + " (" + prog.getLanguageID() + ")" + marker);
             }
         }
@@ -303,14 +319,22 @@ public class McpServerApplication {
     }
 
     /**
-     * Select a specific program by name. Returns true if found.
+     * Select a specific program by name, searching every open program in every window
+     * (not just each window's current tab), and brings it to the front in its window.
+     * Returns true if found.
      */
     static boolean selectProgram(String programName) {
         for (GhidraMCPPlugin p : plugins) {
-            Program prog = p.getCurrentProgram();
-            if (prog != null && prog.getName().equals(programName)) {
-                selectedPlugin = p;
-                return true;
+            ProgramManager pm = p.getProgramManager();
+            if (pm == null) {
+                continue;
+            }
+            for (Program prog : pm.getAllOpenPrograms()) {
+                if (prog.getName().equals(programName)) {
+                    pm.setCurrentProgram(prog);
+                    selectedPlugin = p;
+                    return true;
+                }
             }
         }
         return false;

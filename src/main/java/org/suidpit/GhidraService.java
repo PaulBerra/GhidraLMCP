@@ -155,13 +155,25 @@ public class GhidraService {
         return McpServerApplication.closeProgramByName(programName, saveChanges);
     }
 
-    @Tool(description = "List all functions in the current program")
-    public List<String> listFunctions() {
-        var functionNames = new ArrayList<String>();
-        for (Function function : getProgram().getFunctionManager().getFunctions(true)) {
-            functionNames.add(function.getName());
+    @Tool(description = "List functions in the current program, paginated. offset skips the first N functions (pass 0 to start from the beginning); limit caps how many names are returned (pass 100-200 for large binaries to avoid flooding the context; pass 0 or negative for no cap). Returns the total function count as the first line, then up to limit names starting at offset.")
+    public List<String> listFunctions(int offset, int limit) {
+        if (offset < 0) {
+            offset = 0;
         }
-        return functionNames;
+        int effectiveLimit = limit > 0 ? limit : Integer.MAX_VALUE;
+
+        var all = new ArrayList<String>();
+        for (Function function : getProgram().getFunctionManager().getFunctions(true)) {
+            all.add(function.getName());
+        }
+
+        var result = new ArrayList<String>();
+        result.add("Total functions: " + all.size());
+        int end = Math.min(all.size(), offset + effectiveLimit);
+        for (int i = offset; i < end; i++) {
+            result.add(all.get(i));
+        }
+        return result;
     }
 
     @Tool(description = "Get function entry point address by name")

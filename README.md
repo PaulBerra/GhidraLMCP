@@ -9,7 +9,7 @@ This project is a fork of [suidpit/ghidra-mcp](https://github.com/suidpit/ghidra
 ### Program Management
 | Tool | Description |
 |------|-------------|
-| `listOpenPrograms` | List all open programs across CodeBrowser windows, showing which is active |
+| `listOpenPrograms` | List every open program in every CodeBrowser window (including background tabs), marking each window's current tab and the tool-wide active program |
 | `selectProgram` | Switch which open binary to operate on |
 | `listProjectFiles` | List files in the active Ghidra project (recursively), to discover what can be opened |
 | `openProgram` | Open a program already in the project by path and make it active — no manual tab switching |
@@ -22,7 +22,7 @@ This project is a fork of [suidpit/ghidra-mcp](https://github.com/suidpit/ghidra
 ### Analysis
 | Tool | Description |
 |------|-------------|
-| `listFunctions` | List all functions in the current program |
+| `listFunctions` | List functions in the current program, paginated (offset/limit) to avoid flooding the context on large binaries |
 | `getFunctionAddressByName` | Get function entry point address |
 | `decompileFunctionByName` | Decompile a function to C pseudocode |
 | `getFunctionCallers` | Get functions that call a given function |
