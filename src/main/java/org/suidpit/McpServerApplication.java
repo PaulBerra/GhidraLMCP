@@ -433,7 +433,7 @@ public class McpServerApplication {
         try {
             loadResults = AutoImporter.importByUsingBestGuess(
                     file, project, "/", consumer, log, TaskMonitor.DUMMY);
-            loadResults.save(project, consumer, log, TaskMonitor.DUMMY);
+            loadResults.save(TaskMonitor.DUMMY);
 
             Program program = loadResults.getPrimaryDomainObject();
             pm.openProgram(program);
