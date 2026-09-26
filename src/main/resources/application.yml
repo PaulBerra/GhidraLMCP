@@ -1,0 +1,17 @@
+# These values are overridden programmatically at runtime by McpServerApplication.
+# The server defaults to 127.0.0.1:8888 but automatically selects the next available
+# port if 8888 is occupied. These values serve as the fallback default and documentation.
+# To override:
+#   - Port: GHIDRA_MCP_PORT=<port> or -Dghidra.mcp.port=<port>
+#   - Host: GHIDRA_MCP_HOST=<address> (e.g., 0.0.0.0 for network access)
+server:
+  address: 127.0.0.1
+  port: 8888
+  shutdown: immediate
+spring:
+  ai:
+    mcp:
+      server:
+        name: webflux-mcp-server
+        type: ASYNC
+        port: 8888

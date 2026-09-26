@@ -1,0 +1,302 @@
+name: Check for Ghidra Updates
+
+on:
+  schedule:
+    # Daily 9am UTC
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+    inputs:
+      ghidra_version:
+        description: 'Specific Ghidra version to update to (leave empty for latest)'
+        required: false
+        type: string
+      force:
+        description: 'Force rebuild even if release already exists'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  check-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Detect latest Ghidra release
+        id: ghidra-release
+        run: |
+          if [ -n "${{ github.event.inputs.ghidra_version }}" ]; then
+            # Manual trigger with specific version
+            VERSION="${{ github.event.inputs.ghidra_version }}"
+            TAG="Ghidra_${VERSION}_build"
+            RELEASE_JSON=$(curl -sf "https://api.github.com/repos/NationalSecurityAgency/ghidra/releases/tags/${TAG}")
+          else
+            # Scheduled: get latest
+            RELEASE_JSON=$(curl -sf "https://api.github.com/repos/NationalSecurityAgency/ghidra/releases/latest")
+          fi
+
+          VERSION=$(echo "$RELEASE_JSON" | jq -r '.name' | sed 's/Ghidra //')
+          DOWNLOAD_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[0].browser_download_url')
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "download_url=${DOWNLOAD_URL}" >> "$GITHUB_OUTPUT"
+          echo "Detected Ghidra version: ${VERSION}"
+
+      - name: Check if update is needed
+        id: check-version
+        run: |
+          VERSION="${{ steps.ghidra-release.outputs.version }}"
+          FORCE="${{ github.event.inputs.force }}"
+
+          # If force is true, always proceed
+          if [ "$FORCE" = "true" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Force rebuild requested."
+            exit 0
+          fi
+
+          # Check current version
+          CURRENT=$(cat .ghidra-version 2>/dev/null || echo "none")
+          echo "Current: ${CURRENT}, Latest: ${VERSION}"
+
+          if [ "$CURRENT" = "$VERSION" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Already up to date."
+            echo "Skipped: already up to date (v${VERSION})" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Check if release tag already exists (scheduled runs only)
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            if git ls-remote --tags origin "refs/tags/v${VERSION}" | grep -q "v${VERSION}"; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "Release v${VERSION} already exists."
+              echo "Skipped: release v${VERSION} already exists" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          fi
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "Update available: ${CURRENT} -> ${VERSION}"
+
+      - name: Download and extract Ghidra
+        if: steps.check-version.outputs.skip == 'false'
+        run: |
+          VERSION="${{ steps.ghidra-release.outputs.version }}"
+          URL="${{ steps.ghidra-release.outputs.download_url }}"
+          echo "Downloading Ghidra ${VERSION}..."
+          curl -sSfL -o ghidra.zip "$URL"
+          unzip -q ghidra.zip -d /tmp/ghidra-extract
+          # Find the extracted directory (name varies by release date)
+          GHIDRA_DIR=$(find /tmp/ghidra-extract -maxdepth 1 -type d -name "ghidra_*" | head -1)
+          echo "GHIDRA_INSTALL_DIR=${GHIDRA_DIR}" >> "$GITHUB_ENV"
+          echo "Extracted to: ${GHIDRA_DIR}"
+
+      - name: Detect JDK version
+        if: steps.check-version.outputs.skip == 'false'
+        id: jdk-version
+        run: |
+          # Read Java compiler version from Ghidra's application.properties
+          JAVA_VERSION=$(grep 'application.java.compiler' "${GHIDRA_INSTALL_DIR}/Ghidra/application.properties" \
+            | cut -d= -f2 2>/dev/null)
+          if [ -z "$JAVA_VERSION" ]; then
+            echo "Warning: Could not detect Java version from Ghidra, defaulting to 21"
+            JAVA_VERSION="21"
+          fi
+          echo "java_version=${JAVA_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Detected Java version: ${JAVA_VERSION}"
+
+      - name: Set up JDK
+        if: steps.check-version.outputs.skip == 'false'
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ steps.jdk-version.outputs.java_version }}
+
+      - name: Update project files
+        if: steps.check-version.outputs.skip == 'false'
+        run: |
+          VERSION="${{ steps.ghidra-release.outputs.version }}"
+
+          # Update .ghidra-version
+          echo "${VERSION}" > .ghidra-version
+
+          # Copy Ghidra's own gradle-wrapper.properties
+          cp "${GHIDRA_INSTALL_DIR}/support/gradle/gradle-wrapper.properties" \
+             gradle/wrapper/gradle-wrapper.properties
+
+          echo "Updated .ghidra-version to ${VERSION}"
+          echo "Copied Ghidra's gradle-wrapper.properties"
+
+      - name: Regenerate Gradle wrapper
+        if: steps.check-version.outputs.skip == 'false'
+        run: |
+          # Extract the Gradle version from the properties we just copied
+          GRADLE_VERSION=$(grep distributionUrl gradle/wrapper/gradle-wrapper.properties \
+            | sed 's|.*gradle-\(.*\)-bin.zip|\1|')
+          echo "Regenerating wrapper for Gradle ${GRADLE_VERSION}"
+
+          # Use the system gradle or download one to regenerate the wrapper JAR
+          # The wrapper JAR must match the target Gradle version
+          GHIDRA_INSTALL_DIR="${GHIDRA_INSTALL_DIR}" ./gradlew wrapper \
+            --gradle-version "${GRADLE_VERSION}" || {
+            # If gradlew fails (e.g., wrapper JAR missing), bootstrap with Ghidra's
+            echo "Bootstrapping wrapper from Ghidra's copy..."
+            if [ -f "${GHIDRA_INSTALL_DIR}/support/gradle/gradle-wrapper.jar" ]; then
+              cp "${GHIDRA_INSTALL_DIR}/support/gradle/gradle-wrapper.jar" \
+                 gradle/wrapper/gradle-wrapper.jar
+            fi
+          }
+
+      - name: Build extension
+        if: steps.check-version.outputs.skip == 'false'
+        run: |
+          ./gradlew clean distributeExtension
+          echo "Build artifacts:"
+          ls -la dist/
+
+      - name: Run tests
+        if: steps.check-version.outputs.skip == 'false'
+        run: |
+          ./gradlew test
+
+      - name: Validate build artifact
+        if: steps.check-version.outputs.skip == 'false'
+        id: validate-zip
+        run: |
+          ZIP_FILE=$(ls dist/*.zip 2>/dev/null)
+          if [ -z "$ZIP_FILE" ]; then
+            echo "Error: No ZIP file found in dist/"
+            exit 1
+          fi
+
+          ZIP_COUNT=$(echo "$ZIP_FILE" | wc -l)
+          if [ "$ZIP_COUNT" -ne 1 ]; then
+            echo "Error: Expected exactly one ZIP in dist/, found ${ZIP_COUNT}"
+            ls -la dist/
+            exit 1
+          fi
+
+          ZIP_FILENAME=$(basename "$ZIP_FILE")
+          echo "zip_file=${ZIP_FILE}" >> "$GITHUB_OUTPUT"
+          echo "zip_filename=${ZIP_FILENAME}" >> "$GITHUB_OUTPUT"
+          echo "Validated artifact: ${ZIP_FILENAME}"
+
+      - name: Delete existing release if force rebuild
+        if: steps.check-version.outputs.skip == 'false' && github.event.inputs.force == 'true'
+        run: |
+          VERSION="${{ steps.ghidra-release.outputs.version }}"
+          FORGEJO_URL="${{ github.server_url }}"
+          REPO="${{ github.repository }}"
+
+          # Check if release exists
+          RELEASE_JSON=$(curl -sf -H "Authorization: token ${{ secrets.FORGEJO_TOKEN }}" \
+            "${FORGEJO_URL}/api/v1/repos/${REPO}/releases/tags/v${VERSION}" || echo "")
+
+          if [ -n "$RELEASE_JSON" ]; then
+            RELEASE_ID=$(echo "$RELEASE_JSON" | jq -r '.id')
+            echo "Deleting existing release v${VERSION} (ID: ${RELEASE_ID})..."
+            curl -sf -X DELETE \
+              -H "Authorization: token ${{ secrets.FORGEJO_TOKEN }}" \
+              "${FORGEJO_URL}/api/v1/repos/${REPO}/releases/${RELEASE_ID}"
+          fi
+
+          # Delete tag if it exists
+          git push origin --delete "v${VERSION}" 2>/dev/null || true
+
+      - name: Create Forgejo release
+        if: steps.check-version.outputs.skip == 'false'
+        id: create-release
+        run: |
+          VERSION="${{ steps.ghidra-release.outputs.version }}"
+          FORGEJO_URL="${{ github.server_url }}"
+          REPO="${{ github.repository }}"
+          ZIP_FILE="${{ steps.validate-zip.outputs.zip_file }}"
+          ZIP_FILENAME="${{ steps.validate-zip.outputs.zip_filename }}"
+
+          # Create release
+          RELEASE_JSON=$(curl -sf -X POST \
+            "${FORGEJO_URL}/api/v1/repos/${REPO}/releases" \
+            -H "Authorization: token ${{ secrets.FORGEJO_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"tag_name\": \"v${VERSION}\",
+              \"name\": \"GhidraMCP for Ghidra ${VERSION}\",
+              \"body\": \"GhidraMCP extension built against Ghidra ${VERSION}.\\n\\n## Installation\\n\\nDownload the ZIP file and install it via Ghidra's File -> Install Extensions.\\n\\n## Compatibility\\n\\nThis extension is built for Ghidra ${VERSION}. It may work with other versions but is untested.\",
+              \"target_commitish\": \"main\",
+              \"draft\": false,
+              \"prerelease\": false
+            }")
+
+          RELEASE_ID=$(echo "$RELEASE_JSON" | jq -r '.id')
+          if [ -z "$RELEASE_ID" ] || [ "$RELEASE_ID" = "null" ]; then
+            echo "Failed to create release. Response: $RELEASE_JSON"
+            exit 1
+          fi
+
+          echo "Created release v${VERSION} (ID: ${RELEASE_ID})"
+
+          # Upload ZIP as release asset
+          ASSET_RESPONSE=$(curl -sf -X POST \
+            "${FORGEJO_URL}/api/v1/repos/${REPO}/releases/${RELEASE_ID}/assets?name=${ZIP_FILENAME}" \
+            -H "Authorization: token ${{ secrets.FORGEJO_TOKEN }}" \
+            -H "Content-Type: application/zip" \
+            --data-binary "@${ZIP_FILE}")
+
+          if [ -z "$ASSET_RESPONSE" ]; then
+            echo "Failed to upload asset"
+            exit 1
+          fi
+
+          echo "Uploaded asset: ${ZIP_FILENAME}"
+          echo "Release created: ${FORGEJO_URL}/${REPO}/releases/tag/v${VERSION}"
+
+          # Set output for conditional commit step
+          echo "success=true" >> "$GITHUB_OUTPUT"
+
+      - name: Commit version updates to main
+        if: steps.check-version.outputs.skip == 'false' && steps.create-release.outputs.success == 'true'
+        run: |
+          VERSION="${{ steps.ghidra-release.outputs.version }}"
+
+          git config user.name "Ghidra Release Bot"
+          git config user.email "ghidra-release-bot@noreply"
+
+          # Pull any changes from main
+          if ! git pull --rebase origin main; then
+            echo "Error: Failed to rebase on main. Manual intervention required."
+            exit 1
+          fi
+
+          git add .ghidra-version gradle/wrapper/gradle-wrapper.properties gradle/wrapper/gradle-wrapper.jar gradlew gradlew.bat
+          git diff --cached --quiet && { echo "No changes to commit"; exit 0; }
+
+          git commit -m "chore: update to Ghidra ${VERSION}
+
+          Automated update via CI. Build and release verified successfully.
+
+          Changes:
+          - .ghidra-version: updated to ${VERSION}
+          - gradle-wrapper.properties: synced from Ghidra distribution
+          - gradle-wrapper.jar: regenerated for matching Gradle version"
+
+          git push origin main
+
+      - name: Write job summary
+        if: always()
+        run: |
+          VERSION="${{ steps.ghidra-release.outputs.version }}"
+          ZIP_FILENAME="${{ steps.validate-zip.outputs.zip_filename }}"
+
+          if [ "${{ steps.check-version.outputs.skip }}" = "true" ]; then
+            echo "**Skipped:** Already up to date (v${VERSION})" >> "$GITHUB_STEP_SUMMARY"
+          elif [ "${{ steps.create-release.outputs.success }}" = "true" ]; then
+            echo "**Released:** v${VERSION}" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Asset: ${ZIP_FILENAME}" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Release URL: ${{ github.server_url }}/${{ github.repository }}/releases/tag/v${VERSION}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "**Failed:** Unable to create release for v${VERSION}" >> "$GITHUB_STEP_SUMMARY"
+          fi
